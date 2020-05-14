@@ -24,20 +24,22 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/ghodss/yaml"
 	"github.com/golang/glog"
 	"github.com/google/go-github/github"
+	"golang.org/x/oauth2"
 )
 
 var (
-	tag = ""
-
-	credentialsFile = path.Join(os.Getenv("HOME"), ".shipbot/github_token")
-	//builddir        = path.Join(os.Getenv("HOME"), "release/src/k8s.io/kops")
+	tag               = ""
+	target            = ""
+	configFile        = ""
+	githubUser        = os.Getenv("GITHUB_USER")
+	githubPassword    = os.Getenv("GITHUB_PASSWORD")
+	githubAccessToken = os.Getenv("GITHUB_TOKEN")
 )
 
 type Config struct {
@@ -50,12 +52,13 @@ type Config struct {
 type AssetMapping struct {
 	Source     string `json:"source"`
 	GithubName string `json:"githubName"`
+	Optional   bool   `json:"optional"`
 }
 
 func main() {
 	flag.StringVar(&tag, "tag", "", "tag to push as release")
-	configFile := ""
-	flag.StringVar(&configFile, "config", "", "confg file to use")
+	flag.StringVar(&target, "target", "", "commitish value that determines where the tag is created from")
+	flag.StringVar(&configFile, "config", "", "config file to use")
 	buildDir, err := os.Getwd()
 	if err != nil {
 		glog.Fatalf("error getting current directory: %v", err)
@@ -89,26 +92,22 @@ func main() {
 	}
 
 	{
-		credBytes, err := ioutil.ReadFile(credentialsFile)
-		if err != nil {
-			glog.Fatalf("error reading github token from %q: %v", credentialsFile, err)
-		}
-		creds := strings.TrimSpace(string(credBytes))
-		tokens := strings.Split(creds, ":")
-		if len(tokens) != 2 {
-			glog.Fatalf("unexpected credentials format in %q", credentialsFile)
-		}
-		basicAuthTransport := &github.BasicAuthTransport{
-			Username: tokens[0],
-			Password: tokens[1],
-		}
+		if githubAccessToken != "" {
+			source := oauth2.StaticTokenSource(&oauth2.Token{
+				AccessToken: githubAccessToken,
+			})
+			shipbot.Client = github.NewClient(oauth2.NewClient(ctx, source))
 
-		//ts := oauth2.StaticTokenSource(
-		//	&oauth2.Token{AccessToken: creds},
-		//)
-		//tc := oauth2.NewClient(oauth2.NoContext, ts)
-		//shipbot.Client = github.NewClient(tc)
-		shipbot.Client = github.NewClient(basicAuthTransport.Client())
+		} else if githubUser != "" && githubPassword != "" {
+			transport := &github.BasicAuthTransport{
+				Username: githubUser,
+				Password: githubPassword,
+			}
+			shipbot.Client = github.NewClient(transport.Client())
+
+		} else {
+			glog.Fatalf("unable to find github credentials")
+		}
 	}
 
 	if err := shipbot.DoRelease(ctx, buildDir); err != nil {
@@ -137,14 +136,17 @@ func (sb *Shipbot) DoRelease(ctx context.Context, buildDir string) error {
 	}
 
 	if found == nil {
-		commitSha, err := findCommitSha(buildDir, tag)
-		if err != nil {
-			return fmt.Errorf("cannot find sha for tag %q: %v", tag, err)
+		if target == "" {
+			target, err = findCommitSha(buildDir, tag)
+			if err != nil {
+				return fmt.Errorf("cannot find sha for tag %q: %v", tag, err)
+			}
 		}
-		glog.Infof("SHA is %q", commitSha)
+
+		glog.Infof("target commitish: %s", target)
 		release := &github.RepositoryRelease{
 			TagName:         s(tag),
-			TargetCommitish: s(commitSha),
+			TargetCommitish: s(target),
 			Name:            s(tag),
 			Body:            s("Release " + tag + " (draft)"),
 			Draft:           b(true),
@@ -198,7 +200,11 @@ func findCommitSha(basedir string, tag string) (string, error) {
 func (sb *Shipbot) syncAsset(ctx context.Context, release *github.RepositoryRelease, assetMapping *AssetMapping, assets map[string]*github.ReleaseAsset) error {
 	srcStat, err := os.Stat(assetMapping.Source)
 	if err != nil {
-		return fmt.Errorf("error doing stat %q: %v", assetMapping.Source, err)
+		if !assetMapping.Optional {
+			return fmt.Errorf("error doing stat %q: %v", assetMapping.Source, err)
+		}
+
+		return nil // ignore not found errors
 	}
 
 	existing := assets[assetMapping.GithubName]
@@ -230,7 +236,7 @@ func (sb *Shipbot) syncAsset(ctx context.Context, release *github.RepositoryRele
 		glog.V(2).Infof("error getting absolute path for %q: %v", assetMapping.Source, err)
 		abs = assetMapping.Source
 	}
-	glog.Infof("Uploading %q", abs)
+	glog.Infof("uploading %q", abs)
 	asset, _, err := sb.Client.Repositories.UploadReleaseAsset(ctx, sb.Config.Owner, sb.Config.Repo, i64v(release.ID), uploadOptions, f)
 	if err != nil {
 		return fmt.Errorf("error uploading assets %q: %v", assetMapping.GithubName, err)

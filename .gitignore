@@ -1,16 +1,13 @@
-# IntelliJ / Gogland
-*.iml
-.idea/
+# macOS
+.DS_Store
 
-# Editor temp files
+# vim
 *~
+.sw[a-p]
+.*.sw[a-p]
 
-# Bazel
-bazel-bin
-bazel-genfiles
-bazel-shipbot
-bazel-out
-bazel-testlogs
+# jetbrains
+.idea
 
-# We don't include dependencies
-vendor/
+# vscode
+.vscode/
